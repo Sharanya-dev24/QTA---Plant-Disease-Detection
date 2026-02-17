@@ -1,0 +1,383 @@
+#1. Import libraries
+import os #helps interact with folders and files (used to read image directories).
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+#2. Giving the path for our dataset
+DATASET_DIR = r"enterTheCorrectPathHere/Plant disease detection/Dataset"
+
+
+#3. counting images per class
+class_counts = {}
+
+for class_name in os.listdir(DATASET_DIR):
+    class_path = os.path.join(DATASET_DIR, class_name)
+
+    if os.path.isdir(class_path):
+        num_images = len([
+            img for img in os.listdir(class_path)
+            if img.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
+        class_counts[class_name] = num_images
+
+# Convert to DataFrame
+df_class_counts = pd.DataFrame.from_dict(
+    class_counts, orient='index', columns=['Image_Count']
+).sort_values(by='Image_Count', ascending=False)
+
+df_class_counts
+
+
+#4. Counting the no. of images per crop
+# Function to normalize crop names
+def normalize_crop_name(class_name):
+    crop = class_name.split('___')[0].lower()
+
+    if crop.startswith('tomato'):
+        return 'Tomato'
+    elif crop.startswith('apple'):
+        return 'Apple'
+    elif crop.startswith('potato'):
+        return 'Potato'
+    elif crop.startswith('corn'):
+        return 'Corn'
+    elif crop.startswith('pepper'):
+        return 'Pepper'
+    else:
+        return crop.capitalize()
+
+# List to store results
+data = []
+
+# Iterate through class folders
+for class_name in os.listdir(DATASET_DIR):
+    class_path = os.path.join(DATASET_DIR, class_name)
+
+    if os.path.isdir(class_path):
+        image_count = len([
+            img for img in os.listdir(class_path)
+            if img.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
+
+        crop_name = normalize_crop_name(class_name)
+
+        data.append({
+            "Crop": crop_name,
+            "Class": class_name,
+            "Image_Count": image_count
+        })
+
+# Create DataFrame
+df = pd.DataFrame(data)
+
+# Sort so crops are grouped together
+df_sorted = df.sort_values(
+    by=["Crop", "Image_Count"],
+    ascending=[True, False]
+)
+
+df_sorted
+
+
+#5. Total images per crop
+df_crop_totals = (
+    df_sorted.groupby("Crop")["Image_Count"]
+    .sum()
+    .sort_values(ascending=False)
+    .reset_index()
+)
+
+df_crop_totals
+
+
+#Training Testing split
+#70 training, 15 validation, 15 testing
+#We split at the image level, but within each class folder. 
+#Every disease class contributes images to all three splits
+#Class distribution is preserved across splits (stratified split)
+
+
+#6. Image Preprocessing
+import cv2
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+IMG_HEIGHT = 224
+IMG_WIDTH = 224
+
+def preprocess_image(img):
+    """
+    OpenCV-based preprocessing for plant disease detection:
+    - Resize
+    - Contrast enhancement using CLAHE
+    - Noise reduction
+    - Normalization
+    """
+
+    # Ensure image is uint8 for OpenCV operations
+    if img.dtype != np.uint8:
+        img = img.astype(np.uint8)
+
+    # Resize
+    img = cv2.resize(img, (IMG_WIDTH, IMG_HEIGHT))
+
+    # Convert RGB to LAB color space
+    lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+
+    # Apply CLAHE on L channel #Use for contrast - Contrast Limited Adaptive Histogram Equalization
+    #Makes subtle patterns (like disease spots or textures) more visible
+    #Works well when lighting is uneven
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+
+    # Merge channels and convert back to RGB
+    lab = cv2.merge((l, a, b))
+    img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+    # Gaussian blur for noise reduction
+    img = cv2.GaussianBlur(img, (3, 3), 0)
+
+    # Normalize pixel values
+    img = img.astype(np.float32) / 255.0
+
+    return img
+
+ImageDataGenerator(
+    preprocessing_function=preprocess_image
+)
+#Reads images directly from folders
+#Resizes and normalizes them
+#Applies data augmentation (rotate, flip, zoom, etc.)
+#Generates image batches for training and validation
+print(ImageDataGenerator)
+
+#Data Generators
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+DATASET_DIR = r"EnterTheRightPath/Plant disease detection/Dataset"
+
+IMG_HEIGHT = 224
+IMG_WIDTH = 224
+BATCH_SIZE = 32
+VALIDATION_SPLIT = 0.15
+
+datagen = ImageDataGenerator(
+    preprocessing_function=preprocess_image,
+    validation_split=VALIDATION_SPLIT
+)
+
+#Training Generator
+train_generator = datagen.flow_from_directory(
+    DATASET_DIR,
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    subset='training',
+    shuffle=True
+)
+
+#Validation Generator
+val_generator = datagen.flow_from_directory(
+    DATASET_DIR,
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    subset='validation',
+    shuffle=False
+)
+
+print("Number of classes:", train_generator.num_classes)
+print("Class indices:")
+print(train_generator.class_indices)
+
+print("Training samples:", train_generator.samples)
+print("Validation samples:", val_generator.samples)
+
+
+#7. CNN architecture
+#Library imports
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (
+    Conv2D, MaxPooling2D, Dense, Flatten,
+    Dropout, BatchNormalization
+)
+from tensorflow.keras.optimizers import Adam
+
+#CNN model definition
+#Define cnn model
+NUM_CLASSES = train_generator.num_classes
+
+model = Sequential()
+
+# -------- Block 1 --------
+model.add(Conv2D(32, (3,3), padding='same',
+                 activation='relu',
+                 input_shape=(IMG_HEIGHT, IMG_WIDTH, 3)))
+model.add(BatchNormalization())
+model.add(MaxPooling2D((2,2)))
+
+# -------- Block 2 --------
+model.add(Conv2D(64, (3,3), padding='same', activation='relu'))
+model.add(BatchNormalization())
+model.add(MaxPooling2D((2,2)))
+
+# -------- Block 3 --------
+model.add(Conv2D(128, (3,3), padding='same', activation='relu'))
+model.add(BatchNormalization())
+model.add(MaxPooling2D((2,2)))
+
+# -------- Block 4 --------
+model.add(Conv2D(256, (3,3), padding='same', activation='relu'))
+model.add(BatchNormalization())
+model.add(MaxPooling2D((2,2)))
+
+# -------- Classifier --------
+model.add(Flatten())
+
+model.add(Dense(512, activation='relu')) #Does the main classification #combines all the learned features, and learns all the relationships
+model.add(BatchNormalization())
+model.add(Dropout(0.5))
+
+model.add(Dense(256, activation='relu')) #learns better, reduces dimensionality, helps avoid overfitting, refines the classification decision
+model.add(Dropout(0.3))
+#A single dense layer might be too quick to shift from images to classes, 2 dense layers helps with a more stable classification
+
+# Output layer
+model.add(Dense(NUM_CLASSES, activation='softmax'))
+
+#Compile the model
+model.compile(
+    optimizer=Adam(learning_rate=1e-4), #it trains faster and adapts the learning rate automatically
+    #1e-4: slow learner, stable and controlled learning for a deep CNN, especially when training on image data.
+    loss='categorical_crossentropy', #as it is a multiclass classification problem
+    metrics=['accuracy']
+)
+model.summary()
+
+
+#8. Training the model
+EPOCHS = 30
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+#EarlyStopping: Stops training automatically when the model stops improving on validation data.
+'''monitor='val_loss' → watches validation loss
+patience=5 → waits 5 epochs after the last improvement
+restore_best_weights=True → restores the weights from the best epoch'''
+early_stop = EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    restore_best_weights=True
+)
+
+checkpoint = ModelCheckpoint( #Saves the best version of the model during training.
+    filepath='plant_disease_cnn_best.h5',
+    monitor='val_loss',
+    save_best_only=True
+)
+history = model.fit(
+    train_generator,
+    epochs=EPOCHS,
+    validation_data=val_generator,
+    callbacks=[early_stop, checkpoint]
+)
+
+
+#9. Loading the best trained model
+from tensorflow.keras.models import load_model
+model = load_model("plant_disease_cnn_best.h5")
+
+#Evaluate the model
+val_loss, val_accuracy = model.evaluate(val_generator)
+print("Validation Accuracy:", val_accuracy)
+print("Validation Loss:", val_loss)
+
+import numpy as np
+
+# True labels
+y_true = val_generator.classes
+
+# Predicted labels
+y_pred_prob = model.predict(val_generator)
+y_pred = np.argmax(y_pred_prob, axis=1)
+
+#Classification report
+from sklearn.metrics import classification_report
+class_labels = list(val_generator.class_indices.keys())
+print(classification_report(
+    y_true,
+    y_pred,
+    target_names=class_labels
+))
+
+class_labels = list(val_generator.class_indices.keys())
+#extracts the class names (labels) from the validation data generator and stores them as a list
+
+
+#10. Testing the model
+#Give a random image to the model
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+img_path = r"EnterTheRightPath/Plant disease detection/Dataset/Corn_(maize)___Common_rust_/RS_Rust 1566.jpg"  # <-- change this
+
+# Load image using OpenCV
+img = cv2.imread(img_path)
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# Show original image
+plt.imshow(img)
+plt.axis('off')
+plt.title("Input Leaf Image")
+plt.show()
+
+# Preprocess (reuse SAME function used in training)
+img_processed = preprocess_image(img)
+
+# Add batch dimension
+img_processed = np.expand_dims(img_processed, axis=0)
+
+#Check for the prediction by model
+predictions = model.predict(img_processed)
+
+predicted_class_index = np.argmax(predictions)
+predicted_class = class_labels[predicted_class_index]
+confidence = predictions[0][predicted_class_index] * 100
+
+print(f"Predicted Class: {predicted_class}")
+print(f"Confidence: {confidence:.2f}%")
+
+#Test with another image
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+img_path = r"EnterTheRightPath/Plant disease detection/Dataset/Potato___Late_blight/0c2628d4-8d64-48a9-a157-19a9c902e304___RS_LB 4590.jpg"  # <-- change this
+
+# Load image using OpenCV
+img = cv2.imread(img_path)
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# Show original image
+plt.imshow(img)
+plt.axis('off')
+plt.title("Input Leaf Image")
+plt.show()
+
+# Preprocess (reuse SAME function used in training)
+img_processed = preprocess_image(img)
+
+# Add batch dimension
+img_processed = np.expand_dims(img_processed, axis=0)
+
+#Check for prediction
+predictions = model.predict(img_processed)
+
+predicted_class_index = np.argmax(predictions)
+predicted_class = class_labels[predicted_class_index]
+confidence = predictions[0][predicted_class_index] * 100
+
+print(f"Predicted Class: {predicted_class}")
+print(f"Confidence: {confidence:.2f}%")
